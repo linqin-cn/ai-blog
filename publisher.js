@@ -13,8 +13,22 @@ class CSDNPublisher {
     let browser;
     let context;
     
-    const hasState = fs.existsSync(this.stateFile);
-    console.log(hasState ? '检测到保存的登录状态，正在尝试加载...' : '未检测到保存的状态，需要首次登录');
+    let hasState = fs.existsSync(this.stateFile);
+    if (hasState) {
+      try {
+        const rawState = fs.readFileSync(this.stateFile, 'utf8');
+        if (!rawState || !rawState.trim()) {
+          throw new Error('empty state');
+        }
+        JSON.parse(rawState);
+        console.log('检测到保存的登录状态，正在尝试加载...');
+      } catch (error) {
+        console.log('检测到登录状态文件损坏或为空，将重新登录');
+        hasState = false;
+      }
+    } else {
+      console.log('未检测到保存的状态，需要首次登录');
+    }
 
     browser = await chromium.launch({ 
       headless: this.headless,
@@ -118,6 +132,7 @@ class CSDNPublisher {
   async handleTutorial(page) {
     console.log('检查是否存在教学提示...');
     const tutorialButtons = ['text=我知道了', 'button:has-text("我知道了")', '.guide-close', '.opt-button:has-text("我知道了")', 'text=跳过', 'text=下一步'];
+    const modalCloseSelectors = ['button.modal__close-button.button[aria-label="关闭"]', 'button.modal__close-button[aria-label="关闭"]', 'button[title="关闭"][aria-label="关闭"]', '.el-dialog__headerbtn', '.modal-close', '.close'];
     for (let i = 0; i < 3; i++) {
       let found = false;
       for (const selector of tutorialButtons) {
@@ -131,6 +146,52 @@ class CSDNPublisher {
             break;
           }
         } catch (e) {}
+      }
+      if (!found) {
+        try {
+          const closed = await page.evaluate(() => {
+            const title = Array.from(document.querySelectorAll('.el-dialog__title, .modal-title, h3, h4')).find(el => {
+              return (el.innerText || '').includes('模板库');
+            });
+            if (!title) return false;
+            const modal = title.closest('.el-dialog, [role="dialog"], .modal, .popup');
+            if (!modal) return false;
+            const closePath = 'M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z';
+            const closeButton = modal.querySelector('button.modal__close-button.button[aria-label="关闭"], button.modal__close-button[aria-label="关闭"], button[title="关闭"][aria-label="关闭"], .el-dialog__headerbtn, .modal-close, .close');
+            const closeSvg = Array.from(modal.querySelectorAll('svg.icon')).find(el => {
+              const path = el.querySelector('path');
+              return path && path.getAttribute('d') === closePath;
+            });
+            const target = closeButton || (closeSvg ? (closeSvg.closest('button') || closeSvg.closest('span') || closeSvg) : null);
+            if (!target) return false;
+            target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            return true;
+          });
+          if (closed) {
+            console.log('检测到模板库弹窗，已关闭');
+            found = true;
+          }
+        } catch (e) {}
+      }
+      if (!found) {
+        for (const selector of modalCloseSelectors) {
+          try {
+            const btn = await page.$(selector);
+            if (btn && await btn.isVisible()) {
+              const isTemplateModal = await btn.evaluate((node) => {
+                const modal = node.closest('.el-dialog, [role="dialog"], .modal, .popup');
+                if (!modal) return false;
+                const title = modal.querySelector('.el-dialog__title, .modal-title, h3, h4');
+                return title && (title.innerText || '').includes('模板库');
+              });
+              if (!isTemplateModal) continue;
+              await btn.click({ force: true });
+              await page.waitForTimeout(1000);
+              found = true;
+              break;
+            }
+          } catch (e) {}
+        }
       }
       if (!found) break;
     }
@@ -222,11 +283,27 @@ class CSDNPublisher {
         await page.waitForTimeout(1000);
         const tagInput = await page.waitForSelector('.el-input__inner, input[placeholder*="搜索"]');
         for (const tag of tags) {
+          await tagInput.click({ force: true });
           await tagInput.fill(tag);
-          await page.keyboard.press('Enter');
-          await page.waitForTimeout(500);
+          const picked = await page.evaluate(() => {
+            const list = document.querySelector('ul.el-autocomplete-suggestion__list');
+            if (!list) return false;
+            const first = list.querySelector('li');
+            if (!first || first.offsetHeight === 0) return false;
+            first.click();
+            return true;
+          });
+          if (!picked) {
+            await page.waitForTimeout(500);
+            continue;
+          }
+          await page.waitForFunction((text) => {
+            const candidates = Array.from(document.querySelectorAll('.tag-list .tag-item, .tag-container .tag'));
+            return candidates.some(el => (el.innerText || '').includes(text));
+          }, tag, { timeout: 5000 });
         }
       }
+
     } catch (e) {
       console.log('处理标签失败:', e.message);
     }
@@ -234,22 +311,25 @@ class CSDNPublisher {
     await page.waitForTimeout(2000);
     console.log('正在执行最后一步：点击“发布文章”按钮...');
     
-    const finalResult = await page.evaluate(async () => {
-      const buttons = Array.from(document.querySelectorAll('button'));
-      const finalBtn = buttons.find(b => {
-        const text = b.innerText.trim();
-        return (text === '发布文章' || text === '确定' || text === '确认发布') && b.offsetHeight > 0;
-      });
-      if (finalBtn) {
-        finalBtn.click();
-        return true;
-      }
-      return false;
-    });
+    let finalResult = false;
+    try {
+      const publishBtn = page.locator('button.btn-b-red.ml16:has-text("发布文章"), button.button.btn-b-red:has-text("发布文章")').first();
+      await publishBtn.waitFor({ state: 'visible', timeout: 10000 });
+      await publishBtn.scrollIntoViewIfNeeded();
+      await publishBtn.click({ timeout: 5000 });
+      finalResult = true;
+    } catch (e) {}
 
     if (!finalResult) {
       try {
-        await page.click('button.btn-b-red.ml16, button.button.btn-b-red', { force: true });
+        finalResult = await page.evaluate(() => {
+          const btn = Array.from(document.querySelectorAll('button.btn-b-red.ml16, button.button.btn-b-red'))
+            .find(b => (b.innerText || '').includes('发布文章') && !b.disabled && b.offsetHeight > 0);
+          if (!btn) return false;
+          btn.scrollIntoView({ block: 'center' });
+          btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+          return true;
+        });
       } catch (e) {}
     }
 

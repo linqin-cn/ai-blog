@@ -37,8 +37,9 @@ async function main() {
   console.log(`--- CSDN 自动发布任务开始 ---`);
 
   try {
-    let finalTitle = inputTitle;
-    let finalContent = inputContent;
+      let finalTitle = inputTitle;
+      let finalContent = inputContent;
+      let finalTags = ['AI', '自动化', '技术分享'];
 
     // 1. 确定内容来源
     if (finalTitle && finalContent) {
@@ -47,11 +48,14 @@ async function main() {
       const targetTopic = topic || "自动化技术分享";
       console.log(`ℹ️ 正在根据主题 "${targetTopic}" 使用 AI 生成内容...`);
       const ai = new AIGenerator();
-      const aiResult = await ai.generateContent(targetTopic);
-      finalTitle = aiResult.title;
-      finalContent = aiResult.content;
-      console.log(`✅ AI 内容生成成功`);
-    }
+        const aiResult = await ai.generateContent(targetTopic);
+        finalTitle = aiResult.title;
+        finalContent = aiResult.content;
+        if (Array.isArray(aiResult.tags) && aiResult.tags.length > 0) {
+          finalTags = aiResult.tags;
+        }
+        console.log(`✅ AI 内容生成成功`);
+      }
 
     console.log(`标题: ${finalTitle}`);
     console.log(`内容预览: ${finalContent.substring(0, 50)}...`);
@@ -61,11 +65,11 @@ async function main() {
       headless: process.env.CSDN_HEADLESS === 'true'
     });
 
-    const result = await publisher.publish({
-      title: finalTitle,
-      content: finalContent,
-      tags: ['AI', '自动化', '技术分享']
-    });
+      const result = await publisher.publish({
+        title: finalTitle,
+        content: finalContent,
+        tags: finalTags
+      });
 
     if (result.success) {
       console.log(`\n🎉 博客发布成功！`);
