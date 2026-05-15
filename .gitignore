@@ -1,0 +1,8 @@
+user_data/
+state.json
+.env
+node_modules/
+.idea/
+.env
+.env.local
+*.log
